@@ -1128,6 +1128,7 @@ class PDFDocumentProxy {
  * Page render parameters.
  *
  * @typedef {Object} RenderParameters
+ * @property {Object} xrSession - An XRSession object from the Webxr api.
  * @property {Object} canvasContext - A 2D context of a DOM Canvas object.
  * @property {PageViewport} viewport - Rendering viewport obtained by calling
  *   the `PDFPageProxy.getViewport` method.
@@ -1365,6 +1366,7 @@ class PDFPageProxy {
    *   resolved when the page finishes rendering.
    */
   render({
+    xrSession,
     canvasContext,
     viewport,
     intent = "display",
@@ -1489,6 +1491,7 @@ class PDFPageProxy {
         imageLayer,
         background,
       },
+      xrSession: xrSession,
       objs: this.objs,
       commonObjs: this.commonObjs,
       operatorList: intentState.operatorList,
@@ -3228,6 +3231,7 @@ class InternalRenderTask {
     operatorList,
     pageIndex,
     canvasFactory,
+    xrSession,
     useRequestAnimationFrame = false,
     pdfBug = false,
   }) {
@@ -3244,6 +3248,7 @@ class InternalRenderTask {
     this.running = false;
     this.graphicsReadyCallback = null;
     this.graphicsReady = false;
+    this._xrSession = xrSession;
     this._useRequestAnimationFrame =
       useRequestAnimationFrame === true && typeof window !== "undefined";
     this.cancelled = false;
@@ -3358,7 +3363,7 @@ class InternalRenderTask {
 
   _scheduleNext() {
     if (this._useRequestAnimationFrame) {
-      window.requestAnimationFrame(() => {
+      (this._xrSession || window).requestAnimationFrame(() => {
         this._nextBound().catch(this._cancelBound);
       });
     } else {
