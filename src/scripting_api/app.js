@@ -21,8 +21,8 @@ import { Thermometer } from "./thermometer.js";
 
 const VIEWER_TYPE = "PDF.js";
 const VIEWER_VARIATION = "Full";
-const VIEWER_VERSION = "10.0";
-const FORMS_VERSION = undefined;
+const VIEWER_VERSION = 21.00720099;
+const FORMS_VERSION = 21.00720099;
 
 class App extends PDFObject {
   constructor(data) {
@@ -66,7 +66,6 @@ class App extends PDFObject {
     this._timeoutCallbackId = 0;
     this._globalEval = data.globalEval;
     this._externalCall = data.externalCall;
-    this._document = data._document;
   }
 
   // This function is called thanks to the proxy
@@ -100,16 +99,12 @@ class App extends PDFObject {
     const timeout = Object.create(null);
     const id = { callbackId, interval };
     this._timeoutIds.set(timeout, id);
-    if (this._timeoutIdsRegistry) {
-      this._timeoutIdsRegistry.register(timeout, id);
-    }
+    this._timeoutIdsRegistry?.register(timeout, id);
     return timeout;
   }
 
   _unregisterTimeout(timeout) {
-    if (this._timeoutIdsRegistry) {
-      this._timeoutIdsRegistry.unregister(timeout);
-    }
+    this._timeoutIdsRegistry?.unregister(timeout);
 
     const data = this._timeoutIds.get(timeout);
     if (!data) {
@@ -434,7 +429,7 @@ class App extends PDFObject {
     oDoc = null,
     oCheckbox = null
   ) {
-    if (typeof cMsg === "object") {
+    if (cMsg && typeof cMsg === "object") {
       nType = cMsg.nType;
       cMsg = cMsg.cMsg;
     }
@@ -580,7 +575,7 @@ class App extends PDFObject {
   }
 
   response(cQuestion, cTitle = "", cDefault = "", bPassword = "", cLabel = "") {
-    if (typeof cQuestion === "object") {
+    if (cQuestion && typeof cQuestion === "object") {
       cDefault = cQuestion.cDefault;
       cQuestion = cQuestion.cQuestion;
     }
@@ -590,7 +585,7 @@ class App extends PDFObject {
   }
 
   setInterval(cExpr, nMilliseconds = 0) {
-    if (typeof cExpr === "object") {
+    if (cExpr && typeof cExpr === "object") {
       nMilliseconds = cExpr.nMilliseconds || 0;
       cExpr = cExpr.cExpr;
     }
@@ -609,7 +604,7 @@ class App extends PDFObject {
   }
 
   setTimeOut(cExpr, nMilliseconds = 0) {
-    if (typeof cExpr === "object") {
+    if (cExpr && typeof cExpr === "object") {
       nMilliseconds = cExpr.nMilliseconds || 0;
       cExpr = cExpr.cExpr;
     }

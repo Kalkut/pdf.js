@@ -15,28 +15,21 @@
 
 const compatibilityParams = Object.create(null);
 if (typeof PDFJSDev === "undefined" || PDFJSDev.test("GENERIC")) {
-  const userAgent =
-    (typeof navigator !== "undefined" && navigator.userAgent) || "";
-  const platform =
-    (typeof navigator !== "undefined" && navigator.platform) || "";
-  const maxTouchPoints =
-    (typeof navigator !== "undefined" && navigator.maxTouchPoints) || 1;
+  if (
+    typeof PDFJSDev !== "undefined" &&
+    PDFJSDev.test("LIB") &&
+    typeof navigator === "undefined"
+  ) {
+    globalThis.navigator = Object.create(null);
+  }
+  const userAgent = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  const maxTouchPoints = navigator.maxTouchPoints || 1;
 
   const isAndroid = /Android/.test(userAgent);
   const isIOS =
     /\b(iPad|iPhone|iPod)(?=;)/.test(userAgent) ||
     (platform === "MacIntel" && maxTouchPoints > 1);
-  const isIOSChrome = /CriOS/.test(userAgent);
-
-  // Disables URL.createObjectURL() usage in some environments.
-  // Support: Chrome on iOS
-  (function checkOnBlobSupport() {
-    // Sometimes Chrome on iOS loses data created with createObjectURL(),
-    // see issue 8081.
-    if (isIOSChrome) {
-      compatibilityParams.disableCreateObjectURL = true;
-    }
-  })();
 
   // Limit canvas size to 5 mega-pixels on mobile.
   // Support: Android, iOS
@@ -60,6 +53,11 @@ const OptionKind = {
  *       primitive types and cannot rely on any imported types.
  */
 const defaultOptions = {
+  annotationEditorMode: {
+    /** @type {number} */
+    value: 0,
+    kind: OptionKind.VIEWER + OptionKind.PREFERENCE,
+  },
   annotationMode: {
     /** @type {number} */
     value: 2,
@@ -69,11 +67,6 @@ const defaultOptions = {
     /** @type {number} */
     value: 0,
     kind: OptionKind.VIEWER + OptionKind.PREFERENCE,
-  },
-  defaultUrl: {
-    /** @type {string} */
-    value: "compressed.tracemonkey-pldi-09.pdf",
-    kind: OptionKind.VIEWER,
   },
   defaultZoomValue: {
     /** @type {string} */
@@ -133,8 +126,22 @@ const defaultOptions = {
   maxCanvasPixels: {
     /** @type {number} */
     value: 16777216,
-    compatibility: compatibilityParams.maxCanvasPixels,
     kind: OptionKind.VIEWER,
+  },
+  forcePageColors: {
+    /** @type {boolean} */
+    value: false,
+    kind: OptionKind.VIEWER + OptionKind.PREFERENCE,
+  },
+  pageColorsBackground: {
+    /** @type {string} */
+    value: "Canvas",
+    kind: OptionKind.VIEWER + OptionKind.PREFERENCE,
+  },
+  pageColorsForeground: {
+    /** @type {string} */
+    value: "CanvasText",
+    kind: OptionKind.VIEWER + OptionKind.PREFERENCE,
   },
   pdfBugEnabled: {
     /** @type {boolean} */
@@ -144,11 +151,6 @@ const defaultOptions = {
   printResolution: {
     /** @type {number} */
     value: 150,
-    kind: OptionKind.VIEWER,
-  },
-  renderer: {
-    /** @type {string} */
-    value: "canvas",
     kind: OptionKind.VIEWER,
   },
   sidebarViewOnLoad: {
@@ -282,6 +284,11 @@ if (
   typeof PDFJSDev === "undefined" ||
   PDFJSDev.test("!PRODUCTION || GENERIC")
 ) {
+  defaultOptions.defaultUrl = {
+    /** @type {string} */
+    value: "compressed.tracemonkey-pldi-09.pdf",
+    kind: OptionKind.VIEWER,
+  };
   defaultOptions.disablePreferences = {
     /** @type {boolean} */
     value: typeof PDFJSDev !== "undefined" && PDFJSDev.test("TESTING"),
@@ -289,8 +296,13 @@ if (
   };
   defaultOptions.locale = {
     /** @type {string} */
-    value: typeof navigator !== "undefined" ? navigator.language : "en-US",
+    value: navigator.language || "en-US",
     kind: OptionKind.VIEWER,
+  };
+  defaultOptions.renderer = {
+    /** @type {string} */
+    value: "canvas",
+    kind: OptionKind.VIEWER + OptionKind.PREFERENCE,
   };
   defaultOptions.sandboxBundleSrc = {
     /** @type {string} */
@@ -300,9 +312,12 @@ if (
         : "../build/pdf.sandbox.js",
     kind: OptionKind.VIEWER,
   };
-
-  defaultOptions.renderer.kind += OptionKind.PREFERENCE;
 } else if (PDFJSDev.test("CHROME")) {
+  defaultOptions.defaultUrl = {
+    /** @type {string} */
+    value: "",
+    kind: OptionKind.VIEWER,
+  };
   defaultOptions.disableTelemetry = {
     /** @type {boolean} */
     value: false,
@@ -329,7 +344,7 @@ class AppOptions {
     }
     const defaultOption = defaultOptions[name];
     if (defaultOption !== undefined) {
-      return defaultOption.compatibility ?? defaultOption.value;
+      return compatibilityParams[name] ?? defaultOption.value;
     }
     return undefined;
   }
@@ -361,7 +376,7 @@ class AppOptions {
       options[name] =
         userOption !== undefined
           ? userOption
-          : defaultOption.compatibility ?? defaultOption.value;
+          : compatibilityParams[name] ?? defaultOption.value;
     }
     return options;
   }

@@ -18,6 +18,11 @@ import "./compatibility.js";
 const IDENTITY_MATRIX = [1, 0, 0, 1, 0, 0];
 const FONT_IDENTITY_MATRIX = [0.001, 0, 0, 0.001, 0, 0];
 
+// Represent the percentage of the height of a single-line field over
+// the font size. Acrobat seems to use this value.
+const LINE_FACTOR = 1.35;
+const LINE_DESCENT_FACTOR = 0.35;
+
 /**
  * Refer to the `WorkerTransport.getRenderingIntent`-method in the API, to see
  * how these flags are being used:
@@ -45,6 +50,24 @@ const AnnotationMode = {
   ENABLE: 1,
   ENABLE_FORMS: 2,
   ENABLE_STORAGE: 3,
+};
+
+const AnnotationEditorPrefix = "pdfjs_internal_editor_";
+
+const AnnotationEditorType = {
+  DISABLE: -1,
+  NONE: 0,
+  FREETEXT: 3,
+  INK: 15,
+};
+
+const AnnotationEditorParamsType = {
+  FREETEXT_SIZE: 1,
+  FREETEXT_COLOR: 2,
+  FREETEXT_OPACITY: 3,
+  INK_COLOR: 11,
+  INK_THICKNESS: 12,
+  INK_OPACITY: 13,
 };
 
 // Permission flags from Table 22, Section 7.6.3.2 of the PDF specification.
@@ -324,7 +347,9 @@ const OPS = {
   paintFormXObjectEnd: 75,
   beginGroup: 76,
   endGroup: 77,
+  /** @deprecated unused */
   beginAnnotations: 78,
+  /** @deprecated unused */
   endAnnotations: 79,
   beginAnnotation: 80,
   endAnnotation: 81,
@@ -411,22 +436,6 @@ function assert(cond, msg) {
   }
 }
 
-// Checks if URLs have the same origin. For non-HTTP based URLs, returns false.
-function isSameOrigin(baseUrl, otherUrl) {
-  let base;
-  try {
-    base = new URL(baseUrl);
-    if (!base.origin || base.origin === "null") {
-      return false; // non-HTTP url
-    }
-  } catch (e) {
-    return false;
-  }
-
-  const other = new URL(otherUrl, base);
-  return base.origin === other.origin;
-}
-
 // Checks if URLs use one of the allowed protocols, e.g. to avoid XSS.
 function _isValidProtocol(url) {
   if (!url) {
@@ -488,6 +497,15 @@ function createValidAbsoluteUrl(url, baseUrl = null, options = null) {
 }
 
 function shadow(obj, prop, value) {
+  if (
+    typeof PDFJSDev === "undefined" ||
+    PDFJSDev.test("!PRODUCTION || TESTING")
+  ) {
+    assert(
+      prop in obj,
+      `shadow: Property "${prop && prop.toString()}" not found in object.`
+    );
+  }
   Object.defineProperty(obj, prop, {
     value,
     enumerable: true,
@@ -566,24 +584,14 @@ class AbortException extends BaseException {
   }
 }
 
-const NullCharactersRegExp = /\x00/g;
-
-/**
- * @param {string} str
- */
-function removeNullCharacters(str) {
-  if (typeof str !== "string") {
-    warn("The argument for removeNullCharacters must be a string.");
-    return str;
-  }
-  return str.replace(NullCharactersRegExp, "");
-}
-
 function bytesToString(bytes) {
-  assert(
-    bytes !== null && typeof bytes === "object" && bytes.length !== undefined,
-    "Invalid argument for bytesToString"
-  );
+  if (
+    typeof bytes !== "object" ||
+    bytes === null ||
+    bytes.length === undefined
+  ) {
+    unreachable("Invalid argument for bytesToString");
+  }
   const length = bytes.length;
   const MAX_ARGUMENT_COUNT = 8192;
   if (length < MAX_ARGUMENT_COUNT) {
@@ -599,7 +607,9 @@ function bytesToString(bytes) {
 }
 
 function stringToBytes(str) {
-  assert(typeof str === "string", "Invalid argument for stringToBytes");
+  if (typeof str !== "string") {
+    unreachable("Invalid argument for stringToBytes");
+  }
   const length = str.length;
   const bytes = new Uint8Array(length);
   for (let i = 0; i < length; ++i) {
@@ -613,12 +623,15 @@ function stringToBytes(str) {
  * @param {Array<any>|Uint8Array|string} arr
  * @returns {number}
  */
+// eslint-disable-next-line consistent-return
 function arrayByteLength(arr) {
   if (arr.length !== undefined) {
     return arr.length;
   }
-  assert(arr.byteLength !== undefined, "arrayByteLength - invalid argument.");
-  return arr.byteLength;
+  if (arr.byteLength !== undefined) {
+    return arr.byteLength;
+  }
+  unreachable("Invalid argument for arrayByteLength");
 }
 
 /**
@@ -694,11 +707,6 @@ function isLittleEndian() {
   const view32 = new Uint32Array(buffer8.buffer, 0, 1);
   return view32[0] === 1;
 }
-const IsLittleEndianCached = {
-  get value() {
-    return shadow(this, "value", isLittleEndian());
-  },
-};
 
 // Checks if it's possible to eval JS expressions.
 function isEvalSupported() {
@@ -709,11 +717,24 @@ function isEvalSupported() {
     return false;
   }
 }
-const IsEvalSupportedCached = {
-  get value() {
-    return shadow(this, "value", isEvalSupported());
-  },
-};
+
+class FeatureTest {
+  static get isLittleEndian() {
+    return shadow(this, "isLittleEndian", isLittleEndian());
+  }
+
+  static get isEvalSupported() {
+    return shadow(this, "isEvalSupported", isEvalSupported());
+  }
+
+  static get isOffscreenCanvasSupported() {
+    return shadow(
+      this,
+      "isOffscreenCanvasSupported",
+      typeof OffscreenCanvas !== "undefined"
+    );
+  }
+}
 
 const hexNumbers = [...Array(256).keys()].map(n =>
   n.toString(16).padStart(2, "0")
@@ -722,6 +743,57 @@ const hexNumbers = [...Array(256).keys()].map(n =>
 class Util {
   static makeHexColor(r, g, b) {
     return `#${hexNumbers[r]}${hexNumbers[g]}${hexNumbers[b]}`;
+  }
+
+  // Apply a scaling matrix to some min/max values.
+  // If a scaling factor is negative then min and max must be
+  // swaped.
+  static scaleMinMax(transform, minMax) {
+    let temp;
+    if (transform[0]) {
+      if (transform[0] < 0) {
+        temp = minMax[0];
+        minMax[0] = minMax[1];
+        minMax[1] = temp;
+      }
+      minMax[0] *= transform[0];
+      minMax[1] *= transform[0];
+
+      if (transform[3] < 0) {
+        temp = minMax[2];
+        minMax[2] = minMax[3];
+        minMax[3] = temp;
+      }
+      minMax[2] *= transform[3];
+      minMax[3] *= transform[3];
+    } else {
+      temp = minMax[0];
+      minMax[0] = minMax[2];
+      minMax[2] = temp;
+      temp = minMax[1];
+      minMax[1] = minMax[3];
+      minMax[3] = temp;
+
+      if (transform[1] < 0) {
+        temp = minMax[2];
+        minMax[2] = minMax[3];
+        minMax[3] = temp;
+      }
+      minMax[2] *= transform[1];
+      minMax[3] *= transform[1];
+
+      if (transform[2] < 0) {
+        temp = minMax[0];
+        minMax[0] = minMax[1];
+        minMax[1] = temp;
+      }
+      minMax[0] *= transform[2];
+      minMax[1] *= transform[2];
+    }
+    minMax[0] += transform[4];
+    minMax[1] += transform[4];
+    minMax[2] += transform[5];
+    minMax[3] += transform[5];
   }
 
   // Concatenates two transformation matrices together and returns the result.
@@ -831,46 +903,105 @@ class Util {
   }
 
   // Returns a rectangle [x1, y1, x2, y2] corresponding to the
-  // intersection of rect1 and rect2. If no intersection, returns 'false'
+  // intersection of rect1 and rect2. If no intersection, returns 'null'
   // The rectangle coordinates of rect1, rect2 should be [x1, y1, x2, y2]
   static intersect(rect1, rect2) {
-    function compare(a, b) {
-      return a - b;
+    const xLow = Math.max(
+      Math.min(rect1[0], rect1[2]),
+      Math.min(rect2[0], rect2[2])
+    );
+    const xHigh = Math.min(
+      Math.max(rect1[0], rect1[2]),
+      Math.max(rect2[0], rect2[2])
+    );
+    if (xLow > xHigh) {
+      return null;
     }
-
-    // Order points along the axes
-    const orderedX = [rect1[0], rect1[2], rect2[0], rect2[2]].sort(compare);
-    const orderedY = [rect1[1], rect1[3], rect2[1], rect2[3]].sort(compare);
-    const result = [];
-
-    rect1 = Util.normalizeRect(rect1);
-    rect2 = Util.normalizeRect(rect2);
-
-    // X: first and second points belong to different rectangles?
-    if (
-      (orderedX[0] === rect1[0] && orderedX[1] === rect2[0]) ||
-      (orderedX[0] === rect2[0] && orderedX[1] === rect1[0])
-    ) {
-      // Intersection must be between second and third points
-      result[0] = orderedX[1];
-      result[2] = orderedX[2];
-    } else {
+    const yLow = Math.max(
+      Math.min(rect1[1], rect1[3]),
+      Math.min(rect2[1], rect2[3])
+    );
+    const yHigh = Math.min(
+      Math.max(rect1[1], rect1[3]),
+      Math.max(rect2[1], rect2[3])
+    );
+    if (yLow > yHigh) {
       return null;
     }
 
-    // Y: first and second points belong to different rectangles?
-    if (
-      (orderedY[0] === rect1[1] && orderedY[1] === rect2[1]) ||
-      (orderedY[0] === rect2[1] && orderedY[1] === rect1[1])
-    ) {
-      // Intersection must be between second and third points
-      result[1] = orderedY[1];
-      result[3] = orderedY[2];
-    } else {
-      return null;
+    return [xLow, yLow, xHigh, yHigh];
+  }
+
+  // From https://github.com/adobe-webplatform/Snap.svg/blob/b365287722a72526000ac4bfcf0ce4cac2faa015/src/path.js#L852
+  static bezierBoundingBox(x0, y0, x1, y1, x2, y2, x3, y3) {
+    const tvalues = [],
+      bounds = [[], []];
+    let a, b, c, t, t1, t2, b2ac, sqrtb2ac;
+    for (let i = 0; i < 2; ++i) {
+      if (i === 0) {
+        b = 6 * x0 - 12 * x1 + 6 * x2;
+        a = -3 * x0 + 9 * x1 - 9 * x2 + 3 * x3;
+        c = 3 * x1 - 3 * x0;
+      } else {
+        b = 6 * y0 - 12 * y1 + 6 * y2;
+        a = -3 * y0 + 9 * y1 - 9 * y2 + 3 * y3;
+        c = 3 * y1 - 3 * y0;
+      }
+      if (Math.abs(a) < 1e-12) {
+        if (Math.abs(b) < 1e-12) {
+          continue;
+        }
+        t = -c / b;
+        if (0 < t && t < 1) {
+          tvalues.push(t);
+        }
+        continue;
+      }
+      b2ac = b * b - 4 * c * a;
+      sqrtb2ac = Math.sqrt(b2ac);
+      if (b2ac < 0) {
+        continue;
+      }
+      t1 = (-b + sqrtb2ac) / (2 * a);
+      if (0 < t1 && t1 < 1) {
+        tvalues.push(t1);
+      }
+      t2 = (-b - sqrtb2ac) / (2 * a);
+      if (0 < t2 && t2 < 1) {
+        tvalues.push(t2);
+      }
     }
 
-    return result;
+    let j = tvalues.length,
+      mt;
+    const jlen = j;
+    while (j--) {
+      t = tvalues[j];
+      mt = 1 - t;
+      bounds[0][j] =
+        mt * mt * mt * x0 +
+        3 * mt * mt * t * x1 +
+        3 * mt * t * t * x2 +
+        t * t * t * x3;
+      bounds[1][j] =
+        mt * mt * mt * y0 +
+        3 * mt * mt * t * y1 +
+        3 * mt * t * t * y2 +
+        t * t * t * y3;
+    }
+
+    bounds[0][jlen] = x0;
+    bounds[1][jlen] = y0;
+    bounds[0][jlen + 1] = x3;
+    bounds[1][jlen + 1] = y3;
+    bounds[0].length = bounds[1].length = jlen + 2;
+
+    return [
+      Math.min(...bounds[0]),
+      Math.min(...bounds[1]),
+      Math.max(...bounds[0]),
+      Math.max(...bounds[1]),
+    ];
   }
 }
 
@@ -887,27 +1018,31 @@ const PDFStringTranslateTable = [
 ];
 
 function stringToPDFString(str) {
-  const length = str.length,
-    strBuf = [];
-  if (str[0] === "\xFE" && str[1] === "\xFF") {
-    // UTF16BE BOM
-    for (let i = 2; i < length; i += 2) {
-      strBuf.push(
-        String.fromCharCode((str.charCodeAt(i) << 8) | str.charCodeAt(i + 1))
-      );
+  if (str[0] >= "\xEF") {
+    let encoding;
+    if (str[0] === "\xFE" && str[1] === "\xFF") {
+      encoding = "utf-16be";
+    } else if (str[0] === "\xFF" && str[1] === "\xFE") {
+      encoding = "utf-16le";
+    } else if (str[0] === "\xEF" && str[1] === "\xBB" && str[2] === "\xBF") {
+      encoding = "utf-8";
     }
-  } else if (str[0] === "\xFF" && str[1] === "\xFE") {
-    // UTF16LE BOM
-    for (let i = 2; i < length; i += 2) {
-      strBuf.push(
-        String.fromCharCode((str.charCodeAt(i + 1) << 8) | str.charCodeAt(i))
-      );
+
+    if (encoding) {
+      try {
+        const decoder = new TextDecoder(encoding, { fatal: true });
+        const buffer = stringToBytes(str);
+        return decoder.decode(buffer);
+      } catch (ex) {
+        warn(`stringToPDFString: "${ex}".`);
+      }
     }
-  } else {
-    for (let i = 0; i < length; ++i) {
-      const code = PDFStringTranslateTable[str.charCodeAt(i)];
-      strBuf.push(code ? String.fromCharCode(code) : str.charAt(i));
-    }
+  }
+  // ISO Latin 1
+  const strBuf = [];
+  for (let i = 0, ii = str.length; i < ii; i++) {
+    const code = PDFStringTranslateTable[str.charCodeAt(i)];
+    strBuf.push(code ? String.fromCharCode(code) : str.charAt(i));
   }
   return strBuf.join("");
 }
@@ -948,18 +1083,6 @@ function stringToUTF8String(str) {
 
 function utf8StringToString(str) {
   return unescape(encodeURIComponent(str));
-}
-
-function isBool(v) {
-  return typeof v === "boolean";
-}
-
-function isNum(v) {
-  return typeof v === "number";
-}
-
-function isString(v) {
-  return typeof v === "string";
 }
 
 function isArrayBuffer(v) {
@@ -1029,32 +1152,13 @@ function createPromiseCapability() {
   return capability;
 }
 
-function createObjectURL(data, contentType = "", forceDataSchema = false) {
-  if (URL.createObjectURL && !forceDataSchema) {
-    return URL.createObjectURL(new Blob([data], { type: contentType }));
-  }
-  // Blob/createObjectURL is not available, falling back to data schema.
-  const digits =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
-
-  let buffer = `data:${contentType};base64,`;
-  for (let i = 0, ii = data.length; i < ii; i += 3) {
-    const b1 = data[i] & 0xff;
-    const b2 = data[i + 1] & 0xff;
-    const b3 = data[i + 2] & 0xff;
-    const d1 = b1 >> 2,
-      d2 = ((b1 & 3) << 4) | (b2 >> 4);
-    const d3 = i + 1 < ii ? ((b2 & 0xf) << 2) | (b3 >> 6) : 64;
-    const d4 = i + 2 < ii ? b3 & 0x3f : 64;
-    buffer += digits[d1] + digits[d2] + digits[d3] + digits[d4];
-  }
-  return buffer;
-}
-
 export {
   AbortException,
   AnnotationActionEventType,
   AnnotationBorderStyleType,
+  AnnotationEditorParamsType,
+  AnnotationEditorPrefix,
+  AnnotationEditorType,
   AnnotationFieldFlag,
   AnnotationFlag,
   AnnotationMarkedState,
@@ -1069,11 +1173,11 @@ export {
   BaseException,
   bytesToString,
   CMapCompressionType,
-  createObjectURL,
   createPromiseCapability,
   createValidAbsoluteUrl,
   DocumentActionEventType,
   escapeString,
+  FeatureTest,
   FONT_IDENTITY_MATRIX,
   FontType,
   FormatError,
@@ -1086,12 +1190,8 @@ export {
   isArrayBuffer,
   isArrayEqual,
   isAscii,
-  isBool,
-  IsEvalSupportedCached,
-  IsLittleEndianCached,
-  isNum,
-  isSameOrigin,
-  isString,
+  LINE_DESCENT_FACTOR,
+  LINE_FACTOR,
   MissingPDFException,
   objectFromMap,
   objectSize,
@@ -1100,7 +1200,6 @@ export {
   PasswordException,
   PasswordResponses,
   PermissionFlag,
-  removeNullCharacters,
   RenderingIntentFlag,
   setVerbosityLevel,
   shadow,

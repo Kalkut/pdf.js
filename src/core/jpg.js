@@ -163,11 +163,11 @@ function decodeScan(
             // Heuristic to attempt to handle corrupt JPEG images with too
             // large `scanLines` parameter, by falling back to the currently
             // parsed number of scanLines when it's at least (approximately)
-            // one order of magnitude smaller than expected (fixes
-            // issue10880.pdf and issue10989.pdf).
+            // one "half" order of magnitude smaller than expected (fixes
+            // issue10880.pdf, issue10989.pdf, issue15492.pdf).
             if (
               maybeScanLines > 0 &&
-              Math.round(frame.scanLines / maybeScanLines) >= 10
+              Math.round(frame.scanLines / maybeScanLines) >= 5
             ) {
               throw new DNLMarkerError(
                 "Found EOI marker (0xFFD9) while parsing scan data, " +
@@ -1349,7 +1349,7 @@ class JpegImage {
           (0.00006834815998235662 * y +
             0.00015168452363460973 * k -
             0.09751927774728933) -
-        k * (0.00031891311758832814 * k + 0.7364883807733168);
+        k * (0.0003189131175883281 * k + 0.7364883807733168);
 
       data[offset++] =
         255 +

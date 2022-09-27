@@ -29,7 +29,6 @@ class Field extends PDFObject {
     this.buttonScaleHow = data.buttonScaleHow;
     this.ButtonScaleWhen = data.buttonScaleWhen;
     this.calcOrderIndex = data.calcOrderIndex;
-    this.charLimit = data.charLimit;
     this.comb = data.comb;
     this.commitOnSelChange = data.commitOnSelChange;
     this.currentValueIndices = data.currentValueIndices;
@@ -57,7 +56,6 @@ class Field extends PDFObject {
     this.required = data.required;
     this.richText = data.richText;
     this.richValue = data.richValue;
-    this.rotation = data.rotation;
     this.style = data.style;
     this.submitName = data.submitName;
     this.textFont = data.textFont;
@@ -70,6 +68,7 @@ class Field extends PDFObject {
     this._browseForFileToSubmit = data.browseForFileToSubmit || null;
     this._buttonCaption = null;
     this._buttonIcon = null;
+    this._charLimit = data.charLimit;
     this._children = null;
     this._currentValueIndices = data.currentValueIndices || 0;
     this._document = data.doc;
@@ -84,11 +83,10 @@ class Field extends PDFObject {
     this._kidIds = data.kidIds || null;
     this._fieldType = getFieldType(this._actions);
     this._siblings = data.siblings || null;
+    this._rotation = data.rotation || 0;
 
     this._globalEval = data.globalEval;
     this._appObjects = data.appObjects;
-
-    this.valueAsString = data.valueAsString || this._value;
   }
 
   get currentValueIndices() {
@@ -153,6 +151,17 @@ class Field extends PDFObject {
     this.fillColor = color;
   }
 
+  get charLimit() {
+    return this._charLimit;
+  }
+
+  set charLimit(limit) {
+    if (typeof limit !== "number") {
+      throw new Error("Invalid argument value");
+    }
+    this._charLimit = Math.max(0, Math.floor(limit));
+  }
+
   get numItems() {
     if (!this._isChoice) {
       throw new Error("Not a choice widget");
@@ -188,6 +197,22 @@ class Field extends PDFObject {
 
   set page(_) {
     throw new Error("field.page is read-only");
+  }
+
+  get rotation() {
+    return this._rotation;
+  }
+
+  set rotation(angle) {
+    angle = Math.floor(angle);
+    if (angle % 90 !== 0) {
+      throw new Error("Invalid rotation: must be a multiple of 90");
+    }
+    angle %= 360;
+    if (angle < 0) {
+      angle += 360;
+    }
+    this._rotation = angle;
   }
 
   get textColor() {
@@ -233,7 +258,11 @@ class Field extends PDFObject {
     if (this._isChoice) {
       if (this.multipleSelection) {
         const values = new Set(value);
-        this._currentValueIndices.length = 0;
+        if (Array.isArray(this._currentValueIndices)) {
+          this._currentValueIndices.length = 0;
+        } else {
+          this._currentValueIndices = [];
+        }
         this._items.forEach(({ displayValue }, i) => {
           if (values.has(displayValue)) {
             this._currentValueIndices.push(i);
@@ -248,14 +277,11 @@ class Field extends PDFObject {
   }
 
   get valueAsString() {
-    if (this._valueAsString === undefined) {
-      this._valueAsString = this._value ? this._value.toString() : "";
-    }
-    return this._valueAsString;
+    return (this._value ?? "").toString();
   }
 
-  set valueAsString(val) {
-    this._valueAsString = val ? val.toString() : "";
+  set valueAsString(_) {
+    // Do nothing.
   }
 
   browseForFileToSubmit() {
@@ -372,7 +398,9 @@ class Field extends PDFObject {
     }
 
     if (this._children === null) {
-      this._children = this._document.obj._getChildren(this._fieldPath);
+      this._children = this._document.obj
+        ._getChildren(this._fieldPath)
+        .map(child => child.wrapped);
     }
     return this._children;
   }
@@ -477,7 +505,7 @@ class Field extends PDFObject {
   }
 
   _reset() {
-    this.value = this.valueAsString = this.defaultValue;
+    this.value = this.defaultValue;
   }
 
   _runActions(event) {

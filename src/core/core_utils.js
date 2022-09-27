@@ -14,13 +14,17 @@
  */
 
 import {
+  AnnotationEditorPrefix,
   assert,
   BaseException,
+  FontType,
   objectSize,
+  StreamType,
   stringToPDFString,
   warn,
 } from "../shared/util.js";
-import { Dict, isName, isRef, isStream, RefSet } from "./primitives.js";
+import { Dict, isName, Ref, RefSet } from "./primitives.js";
+import { BaseStream } from "./base_stream.js";
 
 function getLookupTableFactory(initializer) {
   let lookup;
@@ -73,6 +77,55 @@ class XRefEntryException extends BaseException {
 class XRefParseException extends BaseException {
   constructor(msg) {
     super(msg, "XRefParseException");
+  }
+}
+
+class DocStats {
+  constructor(handler) {
+    this._handler = handler;
+
+    this._streamTypes = new Set();
+    this._fontTypes = new Set();
+  }
+
+  _send() {
+    const streamTypes = Object.create(null),
+      fontTypes = Object.create(null);
+    for (const type of this._streamTypes) {
+      streamTypes[type] = true;
+    }
+    for (const type of this._fontTypes) {
+      fontTypes[type] = true;
+    }
+    this._handler.send("DocStats", { streamTypes, fontTypes });
+  }
+
+  addStreamType(type) {
+    if (
+      typeof PDFJSDev === "undefined" ||
+      PDFJSDev.test("!PRODUCTION || TESTING")
+    ) {
+      assert(StreamType[type] === type, 'addStreamType: Invalid "type" value.');
+    }
+    if (this._streamTypes.has(type)) {
+      return;
+    }
+    this._streamTypes.add(type);
+    this._send();
+  }
+
+  addFontType(type) {
+    if (
+      typeof PDFJSDev === "undefined" ||
+      PDFJSDev.test("!PRODUCTION || TESTING")
+    ) {
+      assert(FontType[type] === type, 'addFontType: Invalid "type" value.');
+    }
+    if (this._fontTypes.has(type)) {
+      return;
+    }
+    this._fontTypes.add(type);
+    this._send();
   }
 }
 
@@ -264,7 +317,7 @@ function _collectJS(entry, xref, list, parents) {
   }
 
   let parent = null;
-  if (isRef(entry)) {
+  if (entry instanceof Ref) {
     if (parents.has(entry)) {
       // If we've already found entry then we've a cycle.
       return;
@@ -278,15 +331,15 @@ function _collectJS(entry, xref, list, parents) {
       _collectJS(element, xref, list, parents);
     }
   } else if (entry instanceof Dict) {
-    if (isName(entry.get("S"), "JavaScript") && entry.has("JS")) {
+    if (isName(entry.get("S"), "JavaScript")) {
       const js = entry.get("JS");
       let code;
-      if (isStream(js)) {
+      if (js instanceof BaseStream) {
         code = js.getString();
-      } else {
+      } else if (typeof js === "string") {
         code = js;
       }
-      code = stringToPDFString(code);
+      code = code && stringToPDFString(code).replace(/\u0000/g, "");
       if (code) {
         list.push(code);
       }
@@ -479,16 +532,57 @@ function recoverJsURL(str) {
   return null;
 }
 
+function numberToString(value) {
+  if (Number.isInteger(value)) {
+    return value.toString();
+  }
+
+  const roundedValue = Math.round(value * 100);
+  if (roundedValue % 100 === 0) {
+    return (roundedValue / 100).toString();
+  }
+
+  if (roundedValue % 10 === 0) {
+    return value.toFixed(1);
+  }
+
+  return value.toFixed(2);
+}
+
+function getNewAnnotationsMap(annotationStorage) {
+  if (!annotationStorage) {
+    return null;
+  }
+  const newAnnotationsByPage = new Map();
+  // The concept of page in a XFA is very different, so
+  // editing is just not implemented.
+  for (const [key, value] of annotationStorage) {
+    if (!key.startsWith(AnnotationEditorPrefix)) {
+      continue;
+    }
+    let annotations = newAnnotationsByPage.get(value.pageIndex);
+    if (!annotations) {
+      annotations = [];
+      newAnnotationsByPage.set(value.pageIndex, annotations);
+    }
+    annotations.push(value);
+  }
+  return newAnnotationsByPage.size > 0 ? newAnnotationsByPage : null;
+}
+
 export {
   collectActions,
+  DocStats,
   encodeToXmlString,
   escapePDFName,
   getArrayLookupTableFactory,
   getInheritableProperty,
   getLookupTableFactory,
+  getNewAnnotationsMap,
   isWhiteSpace,
   log2,
   MissingDataException,
+  numberToString,
   ParserEOFException,
   parseXFAPath,
   readInt8,

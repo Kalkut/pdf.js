@@ -18,6 +18,8 @@ import { PDFObject } from "./pdf_object.js";
 import { PrintParams } from "./print_params.js";
 import { ZoomType } from "./constants.js";
 
+const DOC_EXTERNAL = false;
+
 class InfoProxyHandler {
   static get(obj, prop) {
     return obj[prop.toLowerCase()];
@@ -66,6 +68,7 @@ class Doc extends PDFObject {
     this._numPages = data.numPages || 1;
     this._pageNum = data.pageNum || 0;
     this._producer = data.Producer || "";
+    this._securityHandler = data.EncryptFilterName || null;
     this._subject = data.Subject || "";
     this._title = data.Title || "";
     this._URL = data.URL || "";
@@ -271,7 +274,10 @@ class Doc extends PDFObject {
   }
 
   get external() {
-    return true;
+    // According to the specification this should be `true` in non-Acrobat
+    // applications, however we ignore that to avoid bothering users with
+    // an `alert`-dialog on document load (see issue 15509).
+    return DOC_EXTERNAL;
   }
 
   set external(_) {
@@ -522,7 +528,7 @@ class Doc extends PDFObject {
   }
 
   get securityHandler() {
-    return null;
+    return this._securityHandler;
   }
 
   set securityHandler(_) {
@@ -819,8 +825,8 @@ class Doc extends PDFObject {
     /* Not implemented */
   }
 
-  getField(cName) {
-    if (typeof cName === "object") {
+  _getField(cName) {
+    if (cName && typeof cName === "object") {
       cName = cName.cName;
     }
     if (typeof cName !== "string") {
@@ -858,6 +864,14 @@ class Doc extends PDFObject {
     return null;
   }
 
+  getField(cName) {
+    const field = this._getField(cName);
+    if (!field) {
+      return null;
+    }
+    return field.wrapped;
+  }
+
   _getChildren(fieldName) {
     // Children of foo.bar are foo.bar.oof, foo.bar.rab
     // but not foo.bar.oof.FOO.
@@ -867,7 +881,7 @@ class Doc extends PDFObject {
     for (const [name, field] of this._fields.entries()) {
       if (name.startsWith(fieldName)) {
         const finalPart = name.slice(len);
-        if (finalPart.match(pattern)) {
+        if (pattern.test(finalPart)) {
           children.push(field);
         }
       }
@@ -888,7 +902,7 @@ class Doc extends PDFObject {
   }
 
   getNthFieldName(nIndex) {
-    if (typeof nIndex === "object") {
+    if (nIndex && typeof nIndex === "object") {
       nIndex = nIndex.nIndex;
     }
     if (typeof nIndex !== "number") {
@@ -941,10 +955,9 @@ class Doc extends PDFObject {
   }
 
   getPrintParams() {
-    if (!this._printParams) {
-      this._printParams = new PrintParams({ lastPage: this._numPages - 1 });
-    }
-    return this._printParams;
+    return (this._printParams ||= new PrintParams({
+      lastPage: this._numPages - 1,
+    }));
   }
 
   getSound() {
@@ -1026,7 +1039,7 @@ class Doc extends PDFObject {
     bAnnotations = true,
     printParams = null
   ) {
-    if (typeof bUI === "object") {
+    if (bUI && typeof bUI === "object") {
       nStart = bUI.nStart;
       nEnd = bUI.nEnd;
       bSilent = bUI.bSilent;
@@ -1102,30 +1115,53 @@ class Doc extends PDFObject {
   }
 
   resetForm(aFields = null) {
-    if (aFields && !Array.isArray(aFields) && typeof aFields === "object") {
+    // Handle the case resetForm({ aFields: ... })
+    if (aFields && typeof aFields === "object") {
       aFields = aFields.aFields;
     }
+
+    if (aFields && !Array.isArray(aFields)) {
+      aFields = [aFields];
+    }
+
     let mustCalculate = false;
+    let fieldsToReset;
     if (aFields) {
+      fieldsToReset = [];
       for (const fieldName of aFields) {
         if (!fieldName) {
           continue;
         }
-        const field = this.getField(fieldName);
+        if (typeof fieldName !== "string") {
+          // In Acrobat if a fieldName is not a string all the fields are reset.
+          fieldsToReset = null;
+          break;
+        }
+        const field = this._getField(fieldName);
         if (!field) {
           continue;
         }
-        field.value = field.defaultValue;
-        field.valueAsString = field.value;
+        fieldsToReset.push(field);
         mustCalculate = true;
       }
-    } else {
-      mustCalculate = this._fields.size !== 0;
-      for (const field of this._fields.values()) {
-        field.value = field.defaultValue;
-        field.valueAsString = field.value;
-      }
     }
+
+    if (!fieldsToReset) {
+      fieldsToReset = this._fields.values();
+      mustCalculate = this._fields.size !== 0;
+    }
+
+    for (const field of fieldsToReset) {
+      field.obj.value = field.obj.defaultValue;
+      this._send({
+        id: field.obj._id,
+        siblings: field.obj._siblings,
+        value: field.obj.defaultValue,
+        formattedValue: null,
+        selRange: [0, 0],
+      });
+    }
+
     if (mustCalculate) {
       this.calculateNow();
     }

@@ -21,7 +21,6 @@ import {
   getVerbosityLevel,
   info,
   InvalidPDFException,
-  isString,
   MissingPDFException,
   PasswordException,
   setVerbosityLevel,
@@ -32,13 +31,14 @@ import {
   VerbosityLevel,
   warn,
 } from "../shared/util.js";
-import { clearPrimitiveCaches, Dict, Ref } from "./primitives.js";
+import { Dict, Ref } from "./primitives.js";
+import { getNewAnnotationsMap, XRefParseException } from "./core_utils.js";
 import { LocalPdfManager, NetworkPdfManager } from "./pdf_manager.js";
+import { clearGlobalCaches } from "./cleanup_helper.js";
 import { incrementalUpdate } from "./writer.js";
 import { isNodeJS } from "../shared/is_node.js";
 import { MessageHandler } from "../shared/message_handler.js";
 import { PDFWorkerStream } from "./worker_stream.js";
-import { XRefParseException } from "./core_utils.js";
 
 class WorkerTask {
   constructor(name) {
@@ -75,16 +75,8 @@ class WorkerMessageHandler {
       }
       testMessageProcessed = true;
 
-      // check if Uint8Array can be sent to worker
-      if (!(data instanceof Uint8Array)) {
-        handler.send("test", null);
-        return;
-      }
-      // making sure postMessage transfers are working
-      const supportTransfers = data[0] === 255;
-      handler.postMessageTransfers = supportTransfers;
-
-      handler.send("test", { supportTransfers });
+      // Ensure that `TypedArray`s can be sent to the worker.
+      handler.send("test", data instanceof Uint8Array);
     });
 
     handler.on("configure", function wphConfigure(data) {
@@ -139,15 +131,15 @@ class WorkerMessageHandler {
       // Ensure that (primarily) Node.js users won't accidentally attempt to use
       // a non-translated/non-polyfilled build of the library, since that would
       // quickly fail anyway because of missing functionality.
-      if (
-        (typeof PDFJSDev === "undefined" || PDFJSDev.test("SKIP_BABEL")) &&
-        typeof ReadableStream === "undefined"
-      ) {
-        throw new Error(
+      if (typeof ReadableStream === "undefined") {
+        const partialMsg =
           "The browser/environment lacks native support for critical " +
-            "functionality used by the PDF.js library (e.g. `ReadableStream`); " +
-            "please use a `legacy`-build instead."
-        );
+          "functionality used by the PDF.js library (e.g. `ReadableStream`); ";
+
+        if (isNodeJS) {
+          throw new Error(partialMsg + "please use a `legacy`-build instead.");
+        }
+        throw new Error(partialMsg + "please update to a supported browser.");
       }
     }
 
@@ -155,10 +147,6 @@ class WorkerMessageHandler {
     const docBaseUrl = docParams.docBaseUrl;
     const workerHandlerName = docParams.docId + "_worker";
     let handler = new MessageHandler(workerHandlerName, docId, port);
-
-    // Ensure that postMessage transfers are always correctly enabled/disabled,
-    // to prevent "DataCloneError" in browsers without transfers support.
-    handler.postMessageTransfers = docParams.postMessageTransfers;
 
     function ensureNotTerminated() {
       if (terminated) {
@@ -181,11 +169,12 @@ class WorkerMessageHandler {
       await pdfManager.ensureDoc("parseStartXRef");
       await pdfManager.ensureDoc("parse", [recoveryMode]);
 
-      if (!recoveryMode) {
-        // Check that at least the first page can be successfully loaded,
-        // since otherwise the XRef table is definitely not valid.
-        await pdfManager.ensureDoc("checkFirstPage");
-      }
+      // Check that at least the first page can be successfully loaded,
+      // since otherwise the XRef table is definitely not valid.
+      await pdfManager.ensureDoc("checkFirstPage", [recoveryMode]);
+      // Check that the last page can be successfully loaded, to ensure that
+      // `numPages` is correct, and fallback to walking the entire /Pages-tree.
+      await pdfManager.ensureDoc("checkLastPage", [recoveryMode]);
 
       const isPureXfa = await pdfManager.ensureDoc("isPureXfa");
       if (isPureXfa) {
@@ -226,6 +215,7 @@ class WorkerMessageHandler {
             docId,
             source.data,
             source.password,
+            handler,
             evaluatorOptions,
             enableXfa,
             docBaseUrl
@@ -273,8 +263,8 @@ class WorkerMessageHandler {
           // There may be a chance that `newPdfManager` is not initialized for
           // the first few runs of `readchunk` block of code. Be sure to send
           // all cached chunks, if any, to chunked_stream via pdf_manager.
-          for (let i = 0; i < cachedChunks.length; i++) {
-            newPdfManager.sendProgressiveData(cachedChunks[i]);
+          for (const chunk of cachedChunks) {
+            newPdfManager.sendProgressiveData(chunk);
           }
 
           cachedChunks = [];
@@ -298,6 +288,7 @@ class WorkerMessageHandler {
             docId,
             pdfFile,
             source.password,
+            handler,
             evaluatorOptions,
             enableXfa,
             docBaseUrl
@@ -462,8 +453,8 @@ class WorkerMessageHandler {
       });
     });
 
-    handler.on("GetPageIndex", function wphSetupGetPageIndex({ ref }) {
-      const pageRef = Ref.get(ref.num, ref.gen);
+    handler.on("GetPageIndex", function wphSetupGetPageIndex(data) {
+      const pageRef = Ref.get(data.num, data.gen);
       return pdfManager.ensureCatalog("getPageIndex", [pageRef]);
     });
 
@@ -543,13 +534,20 @@ class WorkerMessageHandler {
       });
     });
 
-    handler.on("GetStats", function wphSetupGetStats(data) {
-      return pdfManager.ensureXRef("stats");
-    });
-
     handler.on("GetAnnotations", function ({ pageIndex, intent }) {
       return pdfManager.getPage(pageIndex).then(function (page) {
-        return page.getAnnotationsData(intent);
+        const task = new WorkerTask(`GetAnnotations: page ${pageIndex}`);
+        startWorkerTask(task);
+
+        return page.getAnnotationsData(handler, task, intent).then(
+          data => {
+            finishWorkerTask(task);
+            return data;
+          },
+          reason => {
+            finishWorkerTask(task);
+          }
+        );
       });
     });
 
@@ -570,6 +568,10 @@ class WorkerMessageHandler {
       function ({ isPureXfa, numPages, annotationStorage, filename }) {
         pdfManager.requestLoadedStream();
 
+        const newAnnotationsByPage = !isPureXfa
+          ? getNewAnnotationsMap(annotationStorage)
+          : null;
+
         const promises = [
           pdfManager.onLoadedStream(),
           pdfManager.ensureCatalog("acroForm"),
@@ -577,6 +579,21 @@ class WorkerMessageHandler {
           pdfManager.ensureDoc("xref"),
           pdfManager.ensureDoc("startXRef"),
         ];
+
+        if (newAnnotationsByPage) {
+          for (const [pageIndex, annotations] of newAnnotationsByPage) {
+            promises.push(
+              pdfManager.getPage(pageIndex).then(page => {
+                const task = new WorkerTask(`Save (editor): page ${pageIndex}`);
+                return page
+                  .saveNewAnnotations(handler, task, annotations)
+                  .finally(function () {
+                    finishWorkerTask(task);
+                  });
+              })
+            );
+          }
+        }
 
         if (isPureXfa) {
           promises.push(pdfManager.serializeXfaData(annotationStorage));
@@ -611,11 +628,7 @@ class WorkerMessageHandler {
               return stream.bytes;
             }
           } else {
-            for (const ref of refs) {
-              newRefs = ref
-                .filter(x => x !== null)
-                .reduce((a, b) => a.concat(b), newRefs);
-            }
+            newRefs = refs.flat(2);
 
             if (newRefs.length === 0) {
               // No new refs so just return the initial bytes
@@ -650,7 +663,7 @@ class WorkerMessageHandler {
             const xrefInfo = xref.trailer.get("Info") || null;
             if (xrefInfo instanceof Dict) {
               xrefInfo.forEach((key, value) => {
-                if (isString(key) && isString(value)) {
+                if (typeof value === "string") {
                   infoObj[key] = stringToPDFString(value);
                 }
               });
@@ -751,7 +764,6 @@ class WorkerMessageHandler {
             handler,
             task,
             sink,
-            normalizeWhitespace: data.normalizeWhitespace,
             includeMarkedContent: data.includeMarkedContent,
             combineTextItems: data.combineTextItems,
           })
@@ -807,7 +819,7 @@ class WorkerMessageHandler {
 
         pdfManager = null;
       } else {
-        clearPrimitiveCaches();
+        clearGlobalCaches();
       }
       if (cancelXHRs) {
         cancelXHRs(new AbortException("Worker was terminated."));

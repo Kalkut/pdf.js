@@ -72,7 +72,7 @@ class PDFOutlineViewer extends BaseTreeViewer {
 
     this._pageNumberToDestHashCapability = null;
     this._currentPageNumber = 1;
-    this._isPagesLoaded = false;
+    this._isPagesLoaded = null;
 
     if (
       this._currentOutlineItemCapability &&
@@ -93,8 +93,10 @@ class PDFOutlineViewer extends BaseTreeViewer {
       this._pdfDocument?.loadingParams.disableAutoFetch
     ) {
       this._currentOutlineItemCapability.resolve(/* enabled = */ false);
-    } else if (this._isPagesLoaded) {
-      this._currentOutlineItemCapability.resolve(/* enabled = */ true);
+    } else if (this._isPagesLoaded !== null) {
+      this._currentOutlineItemCapability.resolve(
+        /* enabled = */ this._isPagesLoaded
+      );
     }
 
     this.eventBus.dispatch("outlineloaded", {
@@ -107,11 +109,27 @@ class PDFOutlineViewer extends BaseTreeViewer {
   /**
    * @private
    */
-  _bindLink(element, { url, newWindow, dest }) {
+  _bindLink(element, { url, newWindow, action, dest, setOCGState }) {
     const { linkService } = this;
 
     if (url) {
       linkService.addLinkAttributes(element, url, newWindow);
+      return;
+    }
+    if (action) {
+      element.href = linkService.getAnchorUrl("");
+      element.onclick = () => {
+        linkService.executeNamedAction(action);
+        return false;
+      };
+      return;
+    }
+    if (setOCGState) {
+      element.href = linkService.getAnchorUrl("");
+      element.onclick = () => {
+        linkService.executeSetOCGState(setOCGState);
+        return false;
+      };
       return;
     }
 
@@ -202,7 +220,7 @@ class PDFOutlineViewer extends BaseTreeViewer {
         this._setStyles(element, item);
         element.textContent = this._normalizeTextContent(item.title);
 
-        div.appendChild(element);
+        div.append(element);
 
         if (item.items.length > 0) {
           hasAnyNesting = true;
@@ -210,12 +228,12 @@ class PDFOutlineViewer extends BaseTreeViewer {
 
           const itemsDiv = document.createElement("div");
           itemsDiv.className = "treeItems";
-          div.appendChild(itemsDiv);
+          div.append(itemsDiv);
 
           queue.push({ parent: itemsDiv, items: item.items });
         }
 
-        levelData.parent.appendChild(div);
+        levelData.parent.append(div);
         outlineCount++;
       }
     }
